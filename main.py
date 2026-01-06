@@ -1,5 +1,8 @@
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+import secrets
 import psycopg2
 import os
 import time
@@ -7,6 +10,8 @@ import time
 from security import hash_key, check_admin
 
 # ================= CONFIG =================
+SESSIONS = {}
+SESSION_TTL = 60 * 60 
 
 DB_HOST = os.environ["DB_HOST"]
 DB_NAME = os.environ["DB_NAME"]
@@ -15,6 +20,26 @@ DB_PASS = os.environ["DB_PASS"]
 DB_PORT = os.environ.get("DB_PORT", "5432")
 
 app = FastAPI()
+
+
+def create_session():
+    sid = secrets.token_urlsafe(32)
+    SESSIONS[sid] = time.time()
+    return sid
+
+def valid_session(sid: str | None):
+    if not sid:
+        return False
+
+    ts = SESSIONS.get(sid)
+    if not ts:
+        return False
+
+    if time.time() - ts > SESSION_TTL:
+        del SESSIONS[sid]
+        return False
+
+    return True
 
 
 # ================= DATABASE =================
@@ -89,13 +114,24 @@ def do_login(password: str = Form(...)):
     if not check_admin(password):
         return HTMLResponse("Senha incorreta", status_code=401)
 
-    return RedirectResponse("/panel?auth=" + password, status_code=302)
+    sid = create_session()
+
+    resp = RedirectResponse("/panel", status_code=302)
+    resp.set_cookie(
+        "admin_session",
+        sid,
+        httponly=True,
+        samesite="lax"
+    )
+    return resp
 
 
 @app.get("/panel", response_class=HTMLResponse)
-def panel(auth: str):
-    if not check_admin(auth):
-        return HTMLResponse("Acesso negado", status_code=401)
+def panel(request: Request):
+    sid = request.cookies.get("admin_session")
+
+    if not valid_session(sid):
+        return RedirectResponse("/", status_code=302)
 
     db = get_db()
     c = db.cursor()
@@ -104,12 +140,11 @@ def panel(auth: str):
     c.execute("SELECT raw_key, hwid, active, last_seen FROM licenses")
     rows = c.fetchall()
 
-    html = f"""
+    html = """
     <h2>Painel Admin</h2>
 
     <form method="post" action="/create_key">
       <input name="key" placeholder="XXXX-XXXX-XXXX" required>
-      <input type="hidden" name="auth" value="{auth}">
       <button>Criar Key</button>
     </form>
 
@@ -134,19 +169,16 @@ def panel(auth: str):
           <td>
             <form method="post" action="/ban" style="display:inline">
               <input type="hidden" name="key" value="{raw_key}">
-              <input type="hidden" name="auth" value="{auth}">
               <button>Banir</button>
             </form>
 
             <form method="post" action="/unban" style="display:inline">
               <input type="hidden" name="key" value="{raw_key}">
-              <input type="hidden" name="auth" value="{auth}">
               <button>Desbanir</button>
             </form>
 
             <form method="post" action="/delete" style="display:inline">
               <input type="hidden" name="key" value="{raw_key}">
-              <input type="hidden" name="auth" value="{auth}">
               <button>Excluir</button>
             </form>
           </td>
@@ -160,8 +192,12 @@ def panel(auth: str):
 # ================= ADMIN ACTIONS =================
 
 @app.post("/create_key")
-def create_key(key: str = Form(...), auth: str = Form(...)):
-    if not check_admin(auth):
+def create_key(
+    request: Request,
+    key: str = Form(...)
+):
+    sid = request.cookies.get("admin_session")
+    if not valid_session(sid):
         raise HTTPException(401)
 
     db = get_db()
@@ -173,7 +209,7 @@ def create_key(key: str = Form(...), auth: str = Form(...)):
     )
     db.commit()
 
-    return RedirectResponse("/panel?auth=" + auth, status_code=302)
+    return RedirectResponse("/panel", status_code=302)
 
 
 @app.post("/ban")

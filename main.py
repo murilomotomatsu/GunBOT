@@ -1,12 +1,49 @@
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
+import sqlite3
+import hashlib
 import time
+import os
 
-from database import get_db, init_db
-from security import hash_key, check_admin
+# ================= CONFIG =================
+
+DB_FILE = "licenses.db"
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
 app = FastAPI()
+
+
+# ================= DATABASE =================
+
+def get_db():
+    return sqlite3.connect(DB_FILE, check_same_thread=False)
+
+def init_db():
+    db = get_db()
+    c = db.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS licenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            raw_key TEXT UNIQUE,
+            key_hash TEXT UNIQUE,
+            hwid TEXT,
+            active INTEGER DEFAULT 1,
+            last_seen REAL
+        )
+    """)
+    db.commit()
+
 init_db()
+
+
+# ================= SECURITY =================
+
+def hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+def check_admin(password: str) -> bool:
+    return password == ADMIN_PASSWORD
+
 
 # ================= CLIENT =================
 
@@ -50,6 +87,7 @@ def validate(data: dict):
 
     return {"status": "ok"}
 
+
 # ================= ADMIN UI =================
 
 @app.get("/", response_class=HTMLResponse)
@@ -69,6 +107,7 @@ def do_login(password: str = Form(...)):
 
     return RedirectResponse("/panel?auth=" + password, status_code=302)
 
+
 @app.get("/panel", response_class=HTMLResponse)
 def panel(auth: str):
     if not check_admin(auth):
@@ -83,14 +122,15 @@ def panel(auth: str):
 
     html = f"""
     <style>
-    body {{ font-family: Arial }}
-    .copy {{ cursor: pointer; color: blue; text-decoration: underline }}
+      body {{ font-family: Arial }}
+      button {{ margin: 2px }}
+      .copy {{ cursor:pointer; color:blue }}
     </style>
 
     <script>
-    function copyKey(text) {{
-        navigator.clipboard.writeText(text);
-        alert("Key copiada!");
+    function copyKey(k) {{
+        navigator.clipboard.writeText(k);
+        alert("Key copiada");
     }}
     </script>
 
@@ -98,7 +138,7 @@ def panel(auth: str):
 
     <h3>Criar Key</h3>
     <form method="post" action="/create_key">
-      <input name="key" placeholder="XXXX-XXXX-XXXX" required/>
+      <input name="key" placeholder="XXXX-XXXX-XXXX" required>
       <input type="hidden" name="auth" value="{auth}">
       <button>Criar</button>
     </form>
@@ -110,48 +150,50 @@ def panel(auth: str):
         <th>HWID</th>
         <th>Status</th>
         <th>Online</th>
-        <th>Ação</th>
+        <th>Ações</th>
       </tr>
     """
 
-    online_count = 0
-
     for raw_key, hwid, active, last_seen in rows:
-        is_online = last_seen and (now - last_seen) < 120
-        if is_online:
-            online_count += 1
-
+        online = last_seen and (now - last_seen) < 120
         html += f"""
         <tr>
-          <td>
-            <span class="copy" onclick="copyKey('{raw_key}')">
-              {raw_key}
-            </span>
-          </td>
+          <td onclick="copyKey('{raw_key}')" class="copy">{raw_key}</td>
           <td>{hwid or '-'}</td>
           <td>{"ATIVA" if active else "BANIDA"}</td>
-          <td>{"🟢" if is_online else "⚫"}</td>
+          <td>{"🟢" if online else "⚫"}</td>
           <td>
-            <form method="post" action="/ban">
+            <form method="post" action="/ban" style="display:inline">
               <input type="hidden" name="key" value="{raw_key}">
               <input type="hidden" name="auth" value="{auth}">
               <button>Banir</button>
+            </form>
+
+            <form method="post" action="/unban" style="display:inline">
+              <input type="hidden" name="key" value="{raw_key}">
+              <input type="hidden" name="auth" value="{auth}">
+              <button>Desbanir</button>
+            </form>
+
+            <form method="post" action="/delete" style="display:inline">
+              <input type="hidden" name="key" value="{raw_key}">
+              <input type="hidden" name="auth" value="{auth}">
+              <button style="color:red">Excluir</button>
             </form>
           </td>
         </tr>
         """
 
-    html += f"""
-    </table>
-    <p><b>Online agora:</b> {online_count}</p>
-    """
-
+    html += "</table>"
     return html
+
+
+# ================= ADMIN ACTIONS =================
 
 @app.post("/create_key")
 def create_key(key: str = Form(...), auth: str = Form(...)):
     if not check_admin(auth):
-        return HTMLResponse("Acesso negado", status_code=401)
+        raise HTTPException(401)
 
     db = get_db()
     c = db.cursor()
@@ -167,18 +209,47 @@ def create_key(key: str = Form(...), auth: str = Form(...)):
 
     return RedirectResponse("/panel?auth=" + auth, status_code=302)
 
+
 @app.post("/ban")
 def ban(key: str = Form(...), auth: str = Form(...)):
     if not check_admin(auth):
-        return HTMLResponse("Acesso negado", status_code=401)
+        raise HTTPException(401)
+
+    db = get_db()
+    c = db.cursor()
+
+    c.execute("UPDATE licenses SET active=0 WHERE raw_key=?", (key,))
+    db.commit()
+
+    return RedirectResponse("/panel?auth=" + auth, status_code=302)
+
+
+@app.post("/unban")
+def unban(key: str = Form(...), auth: str = Form(...)):
+    if not check_admin(auth):
+        raise HTTPException(401)
 
     db = get_db()
     c = db.cursor()
 
     c.execute(
-        "UPDATE licenses SET active=0 WHERE raw_key=?",
+        "UPDATE licenses SET active=1, hwid=NULL WHERE raw_key=?",
         (key,)
     )
+    db.commit()
+
+    return RedirectResponse("/panel?auth=" + auth, status_code=302)
+
+
+@app.post("/delete")
+def delete_key(key: str = Form(...), auth: str = Form(...)):
+    if not check_admin(auth):
+        raise HTTPException(401)
+
+    db = get_db()
+    c = db.cursor()
+
+    c.execute("DELETE FROM licenses WHERE raw_key=?", (key,))
     db.commit()
 
     return RedirectResponse("/panel?auth=" + auth, status_code=302)

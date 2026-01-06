@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 import time
 
@@ -15,18 +15,18 @@ def validate(data: dict):
     db = get_db()
     c = db.cursor()
 
-    h = hash_key(data["key"])
+    key_hash = hash_key(data["key"])
 
     c.execute(
-        "SELECT id, hwid, active FROM licenses WHERE key=?",
-        (h,)
+        "SELECT id, hwid, active FROM licenses WHERE key_hash=?",
+        (key_hash,)
     )
     row = c.fetchone()
 
     if not row:
         return {"status": "invalid"}
 
-    _id, saved_hwid, active = row
+    lic_id, saved_hwid, active = row
 
     if not active:
         return {"status": "banned"}
@@ -34,7 +34,7 @@ def validate(data: dict):
     if not saved_hwid:
         c.execute(
             "UPDATE licenses SET hwid=?, last_seen=? WHERE id=?",
-            (data["hwid"], time.time(), _id)
+            (data["hwid"], time.time(), lic_id)
         )
         db.commit()
         return {"status": "ok"}
@@ -44,7 +44,7 @@ def validate(data: dict):
 
     c.execute(
         "UPDATE licenses SET last_seen=? WHERE id=?",
-        (time.time(), _id)
+        (time.time(), lic_id)
     )
     db.commit()
 
@@ -78,45 +78,62 @@ def panel(auth: str):
     c = db.cursor()
 
     now = time.time()
-    c.execute("SELECT key, hwid, active, last_seen FROM licenses")
+    c.execute("SELECT raw_key, hwid, active, last_seen FROM licenses")
     rows = c.fetchall()
 
-    online = [
-        r for r in rows if r[3] and (now - r[3]) < 120
-    ]
+    html = f"""
+    <style>
+    body {{ font-family: Arial }}
+    .copy {{ cursor: pointer; color: blue; text-decoration: underline }}
+    </style>
 
-    html = """
+    <script>
+    function copyKey(text) {{
+        navigator.clipboard.writeText(text);
+        alert("Key copiada!");
+    }}
+    </script>
+
     <h2>Painel Admin</h2>
 
     <h3>Criar Key</h3>
     <form method="post" action="/create_key">
-      <input name="key" placeholder="KEY"/>
+      <input name="key" placeholder="XXXX-XXXX-XXXX" required/>
       <input type="hidden" name="auth" value="{auth}">
       <button>Criar</button>
     </form>
 
     <h3>Licenças</h3>
-    <table border="1">
+    <table border="1" cellpadding="6">
       <tr>
-        <th>Key (hash)</th>
+        <th>Key</th>
         <th>HWID</th>
         <th>Status</th>
         <th>Online</th>
         <th>Ação</th>
       </tr>
-    """.format(auth=auth)
+    """
 
-    for k, hwid, active, last_seen in rows:
+    online_count = 0
+
+    for raw_key, hwid, active, last_seen in rows:
         is_online = last_seen and (now - last_seen) < 120
+        if is_online:
+            online_count += 1
+
         html += f"""
         <tr>
-          <td>{k[:16]}...</td>
+          <td>
+            <span class="copy" onclick="copyKey('{raw_key}')">
+              {raw_key}
+            </span>
+          </td>
           <td>{hwid or '-'}</td>
           <td>{"ATIVA" if active else "BANIDA"}</td>
           <td>{"🟢" if is_online else "⚫"}</td>
           <td>
-            <form method="post" action="/ban" style="display:inline">
-              <input type="hidden" name="key" value="{k}">
+            <form method="post" action="/ban">
+              <input type="hidden" name="key" value="{raw_key}">
               <input type="hidden" name="auth" value="{auth}">
               <button>Banir</button>
             </form>
@@ -124,8 +141,10 @@ def panel(auth: str):
         </tr>
         """
 
-    html += "</table>"
-    html += f"<p>Online agora: {len(online)}</p>"
+    html += f"""
+    </table>
+    <p><b>Online agora:</b> {online_count}</p>
+    """
 
     return html
 
@@ -139,8 +158,8 @@ def create_key(key: str = Form(...), auth: str = Form(...)):
 
     try:
         c.execute(
-            "INSERT INTO licenses (key) VALUES (?)",
-            (hash_key(key),)
+            "INSERT INTO licenses (raw_key, key_hash, active) VALUES (?, ?, 1)",
+            (key, hash_key(key))
         )
         db.commit()
     except:
@@ -157,7 +176,7 @@ def ban(key: str = Form(...), auth: str = Form(...)):
     c = db.cursor()
 
     c.execute(
-        "UPDATE licenses SET active=0 WHERE key=?",
+        "UPDATE licenses SET active=0 WHERE raw_key=?",
         (key,)
     )
     db.commit()

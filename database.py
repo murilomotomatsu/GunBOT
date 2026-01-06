@@ -12,7 +12,8 @@ def init_db():
     c.execute("""
     CREATE TABLE IF NOT EXISTS licenses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        key TEXT UNIQUE,
+        raw_key TEXT UNIQUE,
+        key_hash TEXT,
         hwid TEXT,
         active INTEGER DEFAULT 1,
         last_seen REAL

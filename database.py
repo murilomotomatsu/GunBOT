@@ -2,6 +2,15 @@ import sqlite3
 
 DB = "data.db"
 
+DB_CONFIG = {
+    "host": "db.wmkjfqwjfrkczkdrrhex.supabase.co",
+    "port": 5432,
+    "database": "postgres",
+    "user": "postgres",
+    "password": "Atomosx123!"
+}
+
+
 def get_db():
     return sqlite3.connect(DB, check_same_thread=False)
 

@@ -1,11 +1,18 @@
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
-import sqlite3
+import psycopg2
+import os
 import time
 
 from security import hash_key, check_admin
 
-DB_FILE = "licenses.db"
+# ================= CONFIG =================
+
+DB_HOST = os.environ["DB_HOST"]
+DB_NAME = os.environ["DB_NAME"]
+DB_USER = os.environ["DB_USER"]
+DB_PASS = os.environ["DB_PASS"]
+DB_PORT = os.environ.get("DB_PORT", "5432")
 
 app = FastAPI()
 
@@ -13,24 +20,13 @@ app = FastAPI()
 # ================= DATABASE =================
 
 def get_db():
-    return sqlite3.connect(DB_FILE, check_same_thread=False)
-
-def init_db():
-    db = get_db()
-    c = db.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS licenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            raw_key TEXT UNIQUE,
-            key_hash TEXT UNIQUE,
-            hwid TEXT,
-            active INTEGER DEFAULT 1,
-            last_seen REAL
-        )
-    """)
-    db.commit()
-
-init_db()
+    return psycopg2.connect(
+        host=DB_HOST,
+        database=DB_NAME,
+        user=DB_USER,
+        password=DB_PASS,
+        port=DB_PORT
+    )
 
 
 # ================= CLIENT =================
@@ -43,7 +39,7 @@ def validate(data: dict):
     key_hash = hash_key(data["key"])
 
     c.execute(
-        "SELECT id, hwid, active FROM licenses WHERE key_hash=?",
+        "SELECT id, hwid, active FROM licenses WHERE key_hash=%s",
         (key_hash,)
     )
     row = c.fetchone()
@@ -58,7 +54,7 @@ def validate(data: dict):
 
     if not saved_hwid:
         c.execute(
-            "UPDATE licenses SET hwid=?, last_seen=? WHERE id=?",
+            "UPDATE licenses SET hwid=%s, last_seen=%s WHERE id=%s",
             (data["hwid"], time.time(), lic_id)
         )
         db.commit()
@@ -68,7 +64,7 @@ def validate(data: dict):
         return {"status": "hwid_mismatch"}
 
     c.execute(
-        "UPDATE licenses SET last_seen=? WHERE id=?",
+        "UPDATE licenses SET last_seen=%s WHERE id=%s",
         (time.time(), lic_id)
     )
     db.commit()
@@ -83,16 +79,15 @@ def login():
     return """
     <h2>Admin Login</h2>
     <form method="post" action="/login">
-      <input type="password" name="password" placeholder="Senha"/>
+      <input type="password" name="password">
       <button>Entrar</button>
     </form>
     """
 
-
 @app.post("/login")
 def do_login(password: str = Form(...)):
     if not check_admin(password):
-        return HTMLResponse("<h3>Senha incorreta</h3>", status_code=401)
+        return HTMLResponse("Senha incorreta", status_code=401)
 
     return RedirectResponse("/panel?auth=" + password, status_code=302)
 
@@ -110,29 +105,14 @@ def panel(auth: str):
     rows = c.fetchall()
 
     html = f"""
-    <style>
-      body {{ font-family: Arial }}
-      button {{ margin: 2px }}
-      .copy {{ cursor:pointer; color:blue }}
-    </style>
-
-    <script>
-    function copyKey(k) {{
-        navigator.clipboard.writeText(k);
-        alert("Key copiada");
-    }}
-    </script>
-
     <h2>Painel Admin</h2>
 
-    <h3>Criar Key</h3>
     <form method="post" action="/create_key">
       <input name="key" placeholder="XXXX-XXXX-XXXX" required>
       <input type="hidden" name="auth" value="{auth}">
-      <button>Criar</button>
+      <button>Criar Key</button>
     </form>
 
-    <h3>Licenças</h3>
     <table border="1" cellpadding="6">
       <tr>
         <th>Key</th>
@@ -147,7 +127,7 @@ def panel(auth: str):
         online = last_seen and (now - last_seen) < 120
         html += f"""
         <tr>
-          <td onclick="copyKey('{raw_key}')" class="copy">{raw_key}</td>
+          <td>{raw_key}</td>
           <td>{hwid or '-'}</td>
           <td>{"ATIVA" if active else "BANIDA"}</td>
           <td>{"🟢" if online else "⚫"}</td>
@@ -167,7 +147,7 @@ def panel(auth: str):
             <form method="post" action="/delete" style="display:inline">
               <input type="hidden" name="key" value="{raw_key}">
               <input type="hidden" name="auth" value="{auth}">
-              <button style="color:red">Excluir</button>
+              <button>Excluir</button>
             </form>
           </td>
         </tr>
@@ -187,14 +167,11 @@ def create_key(key: str = Form(...), auth: str = Form(...)):
     db = get_db()
     c = db.cursor()
 
-    try:
-        c.execute(
-            "INSERT INTO licenses (raw_key, key_hash, active) VALUES (?, ?, 1)",
-            (key, hash_key(key))
-        )
-        db.commit()
-    except:
-        pass
+    c.execute(
+        "INSERT INTO licenses (raw_key, key_hash) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        (key, hash_key(key))
+    )
+    db.commit()
 
     return RedirectResponse("/panel?auth=" + auth, status_code=302)
 
@@ -207,7 +184,7 @@ def ban(key: str = Form(...), auth: str = Form(...)):
     db = get_db()
     c = db.cursor()
 
-    c.execute("UPDATE licenses SET active=0 WHERE raw_key=?", (key,))
+    c.execute("UPDATE licenses SET active=false WHERE raw_key=%s", (key,))
     db.commit()
 
     return RedirectResponse("/panel?auth=" + auth, status_code=302)
@@ -222,7 +199,7 @@ def unban(key: str = Form(...), auth: str = Form(...)):
     c = db.cursor()
 
     c.execute(
-        "UPDATE licenses SET active=1, hwid=NULL WHERE raw_key=?",
+        "UPDATE licenses SET active=true, hwid=NULL WHERE raw_key=%s",
         (key,)
     )
     db.commit()
@@ -238,7 +215,7 @@ def delete_key(key: str = Form(...), auth: str = Form(...)):
     db = get_db()
     c = db.cursor()
 
-    c.execute("DELETE FROM licenses WHERE raw_key=?", (key,))
+    c.execute("DELETE FROM licenses WHERE raw_key=%s", (key,))
     db.commit()
 
     return RedirectResponse("/panel?auth=" + auth, status_code=302)

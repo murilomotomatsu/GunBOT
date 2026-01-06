@@ -1,6 +1,5 @@
-import sqlite3
-
-DB = "data.db"
+import psycopg2
+import threading
 
 DB_CONFIG = {
     "host": "db.wmkjfqwjfrkczkdrrhex.supabase.co",
@@ -10,9 +9,22 @@ DB_CONFIG = {
     "password": "Atomosx123!"
 }
 
+_db = None
+_lock = threading.Lock()
 
 def get_db():
-    return sqlite3.connect(DB, check_same_thread=False)
+    global _db
+    with _lock:
+        if _db is None or _db.closed != 0:
+            _db = psycopg2.connect(
+                host=DB_CONFIG["host"],
+                port=DB_CONFIG["port"],
+                database=DB_CONFIG["database"],
+                user=DB_CONFIG["user"],
+                password=DB_CONFIG["password"],
+                connect_timeout=5
+            )
+        return _db
 
 def init_db():
     db = get_db()
@@ -20,14 +32,13 @@ def init_db():
 
     c.execute("""
     CREATE TABLE IF NOT EXISTS licenses (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        raw_key TEXT UNIQUE,
-        key_hash TEXT,
+        id SERIAL PRIMARY KEY,
+        raw_key TEXT UNIQUE NOT NULL,
+        key_hash TEXT UNIQUE NOT NULL,
         hwid TEXT,
-        active INTEGER DEFAULT 1,
-        last_seen REAL
+        active BOOLEAN DEFAULT TRUE,
+        last_seen DOUBLE PRECISION
     )
     """)
 
     db.commit()
-    db.close()

@@ -25,9 +25,9 @@ def get_db():
         database=DB_NAME,
         user=DB_USER,
         password=DB_PASS,
-        port=DB_PORT
+        port=DB_PORT,
+        sslmode="require"
     )
-
 
 # ================= CLIENT =================
 

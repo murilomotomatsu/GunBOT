@@ -1,14 +1,11 @@
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 import sqlite3
-import hashlib
 import time
-import os
 
-# ================= CONFIG =================
+from security import hash_key, check_admin
 
 DB_FILE = "licenses.db"
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
 app = FastAPI()
 
@@ -34,15 +31,6 @@ def init_db():
     db.commit()
 
 init_db()
-
-
-# ================= SECURITY =================
-
-def hash_key(key: str) -> str:
-    return hashlib.sha256(key.encode()).hexdigest()
-
-def check_admin(password: str) -> bool:
-    return password == ADMIN_PASSWORD
 
 
 # ================= CLIENT =================
@@ -99,6 +87,7 @@ def login():
       <button>Entrar</button>
     </form>
     """
+
 
 @app.post("/login")
 def do_login(password: str = Form(...)):

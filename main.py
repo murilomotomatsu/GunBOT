@@ -1,16 +1,13 @@
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
-import secrets
-import psycopg2
-import os
-import time
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+import secrets, psycopg2, os, time
 
 from security import hash_key, check_admin
 
 # ================= CONFIG =================
 
 SESSIONS = {}
-SESSION_TTL = 60 * 60  # 1h
+SESSION_TTL = 60 * 60
 
 DB_HOST = os.environ["DB_HOST"]
 DB_NAME = os.environ["DB_NAME"]
@@ -20,18 +17,6 @@ DB_PORT = os.environ.get("DB_PORT", "5432")
 
 app = FastAPI()
 
-# ================= UPDATE =================
-
-LATEST_VERSION = {
-    "version": "1.0.1",
-    "url": "https://www.dropbox.com/s/SEU_ID/gunBOT_PRO_1.0.1.exe?dl=1",
-    "sha256": "COLE_AQUI_HASH_SHA256"
-}
-
-@app.get("/latest")
-def latest():
-    return LATEST_VERSION
-
 # ================= SESSION =================
 
 def create_session():
@@ -40,18 +25,18 @@ def create_session():
     return sid
 
 def valid_session(sid: str | None):
-    if not sid:
-        return False
-
     ts = SESSIONS.get(sid)
     if not ts:
         return False
-
     if time.time() - ts > SESSION_TTL:
         del SESSIONS[sid]
         return False
-
     return True
+
+def require_admin(request: Request):
+    sid = request.cookies.get("admin_session")
+    if not valid_session(sid):
+        raise HTTPException(401)
 
 # ================= DATABASE =================
 
@@ -65,6 +50,25 @@ def get_db():
         sslmode="require"
     )
 
+# ================= UPDATE API =================
+
+@app.get("/latest")
+def latest():
+    db = get_db()
+    c = db.cursor()
+    c.execute(
+        "SELECT version, url, sha256 FROM updates ORDER BY id DESC LIMIT 1"
+    )
+    row = c.fetchone()
+    if not row:
+        return JSONResponse({}, status_code=204)
+
+    return {
+        "version": row[0],
+        "url": row[1],
+        "sha256": row[2]
+    }
+
 # ================= CLIENT =================
 
 @app.post("/validate")
@@ -73,7 +77,6 @@ def validate(data: dict):
     c = db.cursor()
 
     key_hash = hash_key(data["key"])
-
     c.execute(
         "SELECT id, hwid, active FROM licenses WHERE key_hash=%s",
         (key_hash,)
@@ -84,7 +87,6 @@ def validate(data: dict):
         return {"status": "invalid"}
 
     lic_id, saved_hwid, active = row
-
     if not active:
         return {"status": "banned"}
 
@@ -104,7 +106,6 @@ def validate(data: dict):
         (time.time(), lic_id)
     )
     db.commit()
-
     return {"status": "ok"}
 
 # ================= ADMIN UI =================
@@ -131,43 +132,56 @@ def do_login(password: str = Form(...)):
 
 @app.get("/panel", response_class=HTMLResponse)
 def panel(request: Request):
-    sid = request.cookies.get("admin_session")
-    if not valid_session(sid):
-        return RedirectResponse("/", status_code=302)
+    require_admin(request)
 
     db = get_db()
     c = db.cursor()
-    now = time.time()
 
-    c.execute("SELECT raw_key, hwid, active, last_seen FROM licenses")
-    rows = c.fetchall()
+    # Licenças
+    c.execute("SELECT raw_key, hwid, active FROM licenses")
+    licenses = c.fetchall()
 
-    html = """
-    <h2>Painel Admin</h2>
+    # Update atual
+    c.execute(
+        "SELECT id, version, url, sha256 FROM updates ORDER BY id DESC LIMIT 1"
+    )
+    update = c.fetchone()
 
-    <form method="post" action="/create_key">
-      <input name="key" required>
-      <button>Criar Key</button>
+    html = "<h2>Painel Admin</h2>"
+
+    # ===== UPDATE =====
+    html += """
+    <h3>Atualização</h3>
+    <form method="post" action="/update/create">
+      <input name="version" placeholder="Versão (1.0.1)" required><br>
+      <input name="url" placeholder="URL Dropbox ?dl=1" size="60" required><br>
+      <input name="sha256" placeholder="SHA256" size="70" required><br>
+      <button>Lançar Update</button>
     </form>
-
-    <table border="1" cellpadding="6">
-      <tr>
-        <th>Key</th>
-        <th>HWID</th>
-        <th>Status</th>
-        <th>Online</th>
-        <th>Ações</th>
-      </tr>
     """
 
-    for raw_key, hwid, active, last_seen in rows:
-        online = last_seen and (now - last_seen) < 120
+    if update:
+        html += f"""
+        <p><b>Atual:</b> v{update[1]}</p>
+        <form method="post" action="/update/delete">
+          <input type="hidden" name="id" value="{update[0]}">
+          <button>Excluir Update</button>
+        </form>
+        """
+
+    # ===== LICENSES =====
+    html += """
+    <h3>Licenças</h3>
+    <table border="1" cellpadding="6">
+    <tr><th>Key</th><th>HWID</th><th>Status</th><th>Ações</th></tr>
+    """
+
+    for raw_key, hwid, active in licenses:
         html += f"""
         <tr>
           <td>{raw_key}</td>
           <td>{hwid or '-'}</td>
           <td>{"ATIVA" if active else "BANIDA"}</td>
-          <td>{"🟢" if online else "⚫"}</td>
           <td>
             <form method="post" action="/ban">
               <input type="hidden" name="key" value="{raw_key}">
@@ -188,42 +202,52 @@ def panel(request: Request):
     html += "</table>"
     return html
 
-# ================= ADMIN ACTIONS =================
+# ================= UPDATE ACTIONS =================
 
-def require_admin(request: Request):
-    sid = request.cookies.get("admin_session")
-    if not valid_session(sid):
-        raise HTTPException(401)
-
-@app.post("/create_key")
-def create_key(request: Request, key: str = Form(...)):
+@app.post("/update/create")
+def create_update(
+    request: Request,
+    version: str = Form(...),
+    url: str = Form(...),
+    sha256: str = Form(...)
+):
     require_admin(request)
 
     db = get_db()
     c = db.cursor()
     c.execute(
-        "INSERT INTO licenses (raw_key, key_hash) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-        (key, hash_key(key))
+        "INSERT INTO updates (version, url, sha256) VALUES (%s, %s, %s)",
+        (version, url, sha256)
     )
     db.commit()
 
     return RedirectResponse("/panel", status_code=302)
 
-@app.post("/ban")
-def ban(request: Request, key: str = Form(...)):
+@app.post("/update/delete")
+def delete_update(request: Request, id: int = Form(...)):
     require_admin(request)
 
     db = get_db()
     c = db.cursor()
-    c.execute("UPDATE licenses SET active=false WHERE raw_key=%s", (key,))
+    c.execute("DELETE FROM updates WHERE id=%s", (id,))
     db.commit()
 
+    return RedirectResponse("/panel", status_code=302)
+
+# ================= LICENSE ACTIONS =================
+
+@app.post("/ban")
+def ban(request: Request, key: str = Form(...)):
+    require_admin(request)
+    db = get_db()
+    c = db.cursor()
+    c.execute("UPDATE licenses SET active=false WHERE raw_key=%s", (key,))
+    db.commit()
     return RedirectResponse("/panel", status_code=302)
 
 @app.post("/unban")
 def unban(request: Request, key: str = Form(...)):
     require_admin(request)
-
     db = get_db()
     c = db.cursor()
     c.execute(
@@ -231,16 +255,13 @@ def unban(request: Request, key: str = Form(...)):
         (key,)
     )
     db.commit()
-
     return RedirectResponse("/panel", status_code=302)
 
 @app.post("/delete")
 def delete_key(request: Request, key: str = Form(...)):
     require_admin(request)
-
     db = get_db()
     c = db.cursor()
     c.execute("DELETE FROM licenses WHERE raw_key=%s", (key,))
     db.commit()
-
     return RedirectResponse("/panel", status_code=302)

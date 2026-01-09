@@ -1,6 +1,9 @@
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-import secrets, psycopg2, os, time
+import secrets
+import psycopg2
+import os
+import time
 
 from security import hash_key, check_admin
 
@@ -47,7 +50,7 @@ def get_db():
         user=DB_USER,
         password=DB_PASS,
         port=DB_PORT,
-        sslmode="require"
+        sslmode="require",
     )
 
 # ================= UPDATE API =================
@@ -60,13 +63,14 @@ def latest():
         "SELECT version, url, sha256 FROM updates ORDER BY id DESC LIMIT 1"
     )
     row = c.fetchone()
+
     if not row:
         return JSONResponse({}, status_code=204)
 
     return {
         "version": row[0],
         "url": row[1],
-        "sha256": row[2]
+        "sha256": row[2],
     }
 
 # ================= CLIENT =================
@@ -79,7 +83,7 @@ def validate(data: dict):
     key_hash = hash_key(data["key"])
     c.execute(
         "SELECT id, hwid, active FROM licenses WHERE key_hash=%s",
-        (key_hash,)
+        (key_hash,),
     )
     row = c.fetchone()
 
@@ -87,13 +91,14 @@ def validate(data: dict):
         return {"status": "invalid"}
 
     lic_id, saved_hwid, active = row
+
     if not active:
         return {"status": "banned"}
 
     if not saved_hwid:
         c.execute(
             "UPDATE licenses SET hwid=%s, last_seen=%s WHERE id=%s",
-            (data["hwid"], time.time(), lic_id)
+            (data["hwid"], time.time(), lic_id),
         )
         db.commit()
         return {"status": "ok"}
@@ -103,7 +108,7 @@ def validate(data: dict):
 
     c.execute(
         "UPDATE licenses SET last_seen=%s WHERE id=%s",
-        (time.time(), lic_id)
+        (time.time(), lic_id),
     )
     db.commit()
     return {"status": "ok"}
@@ -137,11 +142,9 @@ def panel(request: Request):
     db = get_db()
     c = db.cursor()
 
-    # Licenças
-    c.execute("SELECT raw_key, hwid, active FROM licenses")
+    c.execute("SELECT raw_key, hwid, active FROM licenses ORDER BY id DESC")
     licenses = c.fetchall()
 
-    # Update atual
     c.execute(
         "SELECT id, version, url, sha256 FROM updates ORDER BY id DESC LIMIT 1"
     )
@@ -149,12 +152,22 @@ def panel(request: Request):
 
     html = "<h2>Painel Admin</h2>"
 
+    # ===== CREATE KEY =====
+    html += """
+    <h3>Criar nova licença (manual)</h3>
+    <form method="post" action="/create_key">
+      <input name="key" placeholder="XXXX-XXXX-XXXX" required>
+      <button>Criar Key</button>
+    </form>
+    <hr>
+    """
+
     # ===== UPDATE =====
     html += """
     <h3>Atualização</h3>
     <form method="post" action="/update/create">
       <input name="version" placeholder="Versão (1.0.1)" required><br>
-      <input name="url" placeholder="URL Dropbox ?dl=1" size="60" required><br>
+      <input name="url" placeholder="URL ?dl=1" size="60" required><br>
       <input name="sha256" placeholder="SHA256" size="70" required><br>
       <button>Lançar Update</button>
     </form>
@@ -180,7 +193,7 @@ def panel(request: Request):
         html += f"""
         <tr>
           <td>{raw_key}</td>
-          <td>{hwid or '-'}</td>
+          <td>{hwid or "-"}</td>
           <td>{"ATIVA" if active else "BANIDA"}</td>
           <td>
             <form method="post" action="/ban">
@@ -202,6 +215,42 @@ def panel(request: Request):
     html += "</table>"
     return html
 
+# ================= CREATE KEY =================
+
+@app.post("/create_key")
+def create_key(
+    request: Request,
+    key: str = Form(...),
+):
+    require_admin(request)
+
+    key = key.strip()
+    if len(key) < 8:
+        return HTMLResponse("Key inválida", status_code=400)
+
+    key_hash = hash_key(key)
+
+    db = get_db()
+    c = db.cursor()
+
+    c.execute(
+        "SELECT 1 FROM licenses WHERE key_hash=%s",
+        (key_hash,),
+    )
+    if c.fetchone():
+        return HTMLResponse("Key já existe", status_code=400)
+
+    c.execute(
+        """
+        INSERT INTO licenses (raw_key, key_hash, active, hwid, last_seen)
+        VALUES (%s, %s, true, NULL, NULL)
+        """,
+        (key, key_hash),
+    )
+    db.commit()
+
+    return RedirectResponse("/panel", status_code=302)
+
 # ================= UPDATE ACTIONS =================
 
 @app.post("/update/create")
@@ -209,7 +258,7 @@ def create_update(
     request: Request,
     version: str = Form(...),
     url: str = Form(...),
-    sha256: str = Form(...)
+    sha256: str = Form(...),
 ):
     require_admin(request)
 
@@ -217,7 +266,7 @@ def create_update(
     c = db.cursor()
     c.execute(
         "INSERT INTO updates (version, url, sha256) VALUES (%s, %s, %s)",
-        (version, url, sha256)
+        (version, url, sha256),
     )
     db.commit()
 
@@ -252,7 +301,7 @@ def unban(request: Request, key: str = Form(...)):
     c = db.cursor()
     c.execute(
         "UPDATE licenses SET active=true, hwid=NULL WHERE raw_key=%s",
-        (key,)
+        (key,),
     )
     db.commit()
     return RedirectResponse("/panel", status_code=302)

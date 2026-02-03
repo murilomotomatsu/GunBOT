@@ -1,0 +1,4 @@
+certutil -hashfile gunBOT_PRO.exe SHA256
+
+
+pyinstaller --clean gunBOT_PRO.spec

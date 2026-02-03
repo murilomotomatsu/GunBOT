@@ -1,0 +1,29 @@
+{
+  "window_title": "",
+  "macros": [
+    {
+      "id": "01d90fc8-bb9b-4e25-abbd-51631ad68542",
+      "name": "Download",
+      "trigger": {
+        "image": null,
+        "confidence": 0.8,
+        "condition": "if_found"
+      },
+      "steps": [
+        {
+          "type": "click",
+          "image": "macros\\01d90fc8-bb9b-4e25-abbd-51631ad68542\\c9a736dd-aa95-4c74-a7ba-c0a54ee58041.png",
+          "confidence": 0.8,
+          "condition": "always",
+          "img_size": 8,
+          "image_id": "c9a736dd-aa95-4c74-a7ba-c0a54ee58041",
+          "button": "left"
+        }
+      ]
+    }
+  ],
+  "window": {
+    "hwnd": 4066234,
+    "title": "Processos teste - Google Drive - Google Chrome"
+  }
+}
